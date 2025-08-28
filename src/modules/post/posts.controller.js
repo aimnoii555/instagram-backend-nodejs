@@ -114,6 +114,9 @@ export async function createPost(req, res, next) {
 export async function getPost(req, res, next) {
     const postId = Number(req.params.id);
     const myId = req.user?.id || 0;
+
+
+
     try {
         const [rows] = await pool.query(
             `SELECT p.id, p.caption, p.location, p.created_at,
@@ -121,11 +124,16 @@ export async function getPost(req, res, next) {
               (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes,
               (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) AS comments,
               EXISTS(SELECT 1 FROM likes l WHERE l.post_id = p.id AND l.user_id = ?) AS liked
-       FROM posts p
-       JOIN users u ON u.id = p.user_id
-       WHERE p.id = ? LIMIT 1`,
+            FROM posts p
+            JOIN users u ON u.id = p.user_id
+            WHERE p.id = ? LIMIT 1`,
             [myId, postId]
         );
+
+        const ownerId = rows[0].id; // โค้ดเดิม map u.id AS id (เจ้าของโพสต์)
+        const allowed = await canViewUserContent(myId, ownerId);
+        if (!allowed) return res.status(403).json({ error: 'This account is private' });
+
         if (!rows.length) return res.status(404).json({ error: 'Post not found' });
         const [mediaRows] = await pool.query(
             'SELECT * FROM post_media WHERE post_id = ? ORDER BY position ASC',
@@ -141,8 +149,16 @@ export async function getPost(req, res, next) {
 export async function listUserPosts(req, res, next) {
     const uid = Number(req.params.id);
     const myId = req.user?.id || 0;
+
     const limit = Math.min(Number(req.query.limit) || 20, 50);
     const offset = Math.max(Number(req.query.offset) || 0, 0);
+
+    const allowed = await canViewUserContent(myId, uid);
+
+    if (!allowed) {
+        return res.status(403).json({ error: 'This account is private' });
+    }
+
 
     try {
         const [rows] = await pool.query(
@@ -244,15 +260,15 @@ export async function likePost(req, res, next) {
             'INSERT IGNORE INTO likes (user_id, post_id) VALUES (?, ?)',
             [myId, postId]
         );
-            if (r.affectedRows === 1) {
-                const [[owner]] = await pool.query('SELECT user_id FROM posts WHERE id = ? LIMIT 1', [postId]);
-                if (owner && owner.user_id !== myId) {
-                    await pool.query(
+        if (r.affectedRows === 1) {
+            const [[owner]] = await pool.query('SELECT user_id FROM posts WHERE id = ? LIMIT 1', [postId]);
+            if (owner && owner.user_id !== myId) {
+                await pool.query(
                     'INSERT INTO notifications (user_id, actor_id, type, ref_id, message) VALUES (?, ?, "like", ?, ?)',
                     [owner.user_id, myId, postId, 'liked your post']
-                    );
-                }
+                );
             }
+        }
 
         return res.status(r.affectedRows ? 201 : 200).json({ status: 'ok', liked: true });
     } catch (err) {
@@ -283,7 +299,7 @@ export async function addComment(req, res, next) {
     try {
         const [r] = await pool.query(
             'INSERT INTO comments (post_id, user_id, text, parent_id) VALUES (?, ?, ?, ?)',
-            [postId, myId, text, parentId,'commented on your post']
+            [postId, myId, text, parentId, 'commented on your post']
         );
         const commentId = r.insertId;
         const [[row]] = await pool.query(
@@ -337,4 +353,17 @@ export async function listComments(req, res, next) {
     } catch (err) {
         return next(err);
     }
+}
+
+// บังคับ “สิทธิ์เข้าถึง” สำหรับคอนเทนต์ Posts (โปรไฟล์คนอื่น / รายการ / รายละเอียด)
+async function canViewUserContent(viewerId, ownerId) {
+    if (viewerId === ownerId) return true;
+    const [[u]] = await pool.query('SELECT is_private FROM users WHERE id = ? LIMIT 1', [ownerId]);
+    if (!u) return false;
+    if (u.is_private === 0) return true;
+    const [fx] = await pool.query(
+        'SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ? LIMIT 1',
+        [viewerId, ownerId]
+    );
+    return fx.length > 0;
 }

@@ -67,6 +67,17 @@ export async function getPublicProfileByUsername(req, res, next) {
             is_following = fx.length > 0;
         }
 
+        // โปรไฟล์: บอกสถานะ pending ให้ชัด
+        let pending = false;
+        if (req.user?.id) {
+            const myId = req.user.id;
+            const [pr] = await pool.query(
+                'SELECT 1 FROM follow_requests WHERE follower_id = ? AND following_id = ? LIMIT 1',
+                [myId, userId]
+            );
+            pending = pr.length > 0;
+        }
+
         return res.json({
             user: {
                 ...shapeUser(u),
@@ -77,7 +88,8 @@ export async function getPublicProfileByUsername(req, res, next) {
                 followers: Number(followersCount.followers || 0),
                 following: Number(followingCount.following || 0)
             },
-            is_following
+            is_following,
+            pending
         });
     } catch (err) {
         return next(err);
@@ -169,10 +181,10 @@ export async function followUser(req, res, next) {
 
 
         // มีผู้ใช้ปลายทางจริงไหม
-        const [[target]] = await pool.query('SELECT id FROM users WHERE id = ? LIMIT 1', [targetId]);
+        const [[target]] = await pool.query('SELECT id,is_private FROM users WHERE id = ? LIMIT 1', [targetId]);
 
         if (!target) return res.status(404).json({ error: 'User not found' });
-
+    
         if (target.is_private) {
             // ถ้า private → สร้างคำขอ (pending) แทนการ follow ทันที
             await pool.query(
@@ -232,10 +244,10 @@ export async function unfollowUser(req, res, next) {
             [myId, targetId]);
 
 
-        // const [result] = await pool.query(
-        //     'DELETE FROM follows WHERE follower_id = ? AND following_id = ?',
-        //     [myId, targetId]
-        // );
+        const [result] = await pool.query(
+            'DELETE FROM follows WHERE follower_id = ? AND following_id = ?',
+            [myId, targetId]
+        );
 
         let canceledRequest = false;
         if (!delFollow.affectedRows) {
@@ -250,7 +262,9 @@ export async function unfollowUser(req, res, next) {
         return res.status(result.affectedRows ? 200 : 200).json({
             status: 'ok',
             following: false,
-            removed: result.affectedRows > 0
+            removed: result.affectedRows > 0,
+            pedding: false,
+            canceled_request: canceledRequest
         });
     } catch (err) {
         return next(err);

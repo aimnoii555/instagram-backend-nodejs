@@ -74,6 +74,26 @@ export async function listUserStories(req, res, next) {
     try {
         const uid = Number(req.params.id);
         const myId = req.user.id;
+
+        const allowed = await (async () => {
+            if (myId === uid) return true;
+
+            const [[u]] = await pool.query('SELECT is_private FROM users WHERE id = ? LIMIT 1', [uid]);
+
+            if (!u) return false;
+
+            if (u.is_private === 0) return true;
+
+            const [fx] = await pool.query(
+                'SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ? LIMIT 1',
+                [myId, uid]
+            );
+        return fx.length > 0;
+        })();
+
+        if (!allowed) return res.status(403).json({ error: 'This account is private' });
+
+
         // (ในอนาคต: เช็ค privacy/blocked/close-friends ตามต้องการ)
         const [rows] = await pool.query(
             `SELECT s.id, s.media_url, s.media_type, s.expires_at, s.created_at,

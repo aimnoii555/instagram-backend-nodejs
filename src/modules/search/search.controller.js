@@ -20,19 +20,40 @@ export async function search(req, res, next) {
         );
 
         // Posts by caption keyword (top by likes)
+    //     const [posts] = await pool.query(
+    //         `SELECT p.id, p.caption, p.location, p.created_at,
+    //           u.id AS id, u.username, u.avatar_url,
+    //           (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes,
+    //           (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) AS comments,
+    //           EXISTS(SELECT 1 FROM likes l WHERE l.post_id = p.id AND l.user_id = ?) AS liked
+    //    FROM posts p
+    //    JOIN users u ON u.id = p.user_id
+    //    WHERE p.caption LIKE ?
+    //    ORDER BY likes DESC, p.created_at DESC
+    //    LIMIT ?`,
+    //         [myId, `%${q}%`, limitPosts]
+    //     );
+
         const [posts] = await pool.query(
             `SELECT p.id, p.caption, p.location, p.created_at,
-              u.id AS id, u.username, u.avatar_url,
-              (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes,
-              (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) AS comments,
-              EXISTS(SELECT 1 FROM likes l WHERE l.post_id = p.id AND l.user_id = ?) AS liked
-       FROM posts p
-       JOIN users u ON u.id = p.user_id
-       WHERE p.caption LIKE ?
-       ORDER BY likes DESC, p.created_at DESC
-       LIMIT ?`,
-            [myId, `%${q}%`, limitPosts]
+                    u.id AS id, u.username, u.avatar_url, u.is_private,
+                    (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes,
+                    (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) AS comments,
+                    EXISTS(SELECT 1 FROM likes l WHERE l.post_id = p.id AND l.user_id = ?) AS liked
+            FROM posts p
+            JOIN users u ON u.id = p.user_id
+            WHERE p.caption LIKE ?
+                AND (
+                u.is_private = 0
+                OR u.id = ?
+                OR u.id IN (SELECT following_id FROM follows WHERE follower_id = ?)
+                )
+            ORDER BY likes DESC, p.created_at DESC
+            LIMIT ?`,
+            [myId, `%${q}%`, myId, myId, limitPosts]
         );
+
+
 
         // media 1 ชิ้นแรกไว้ทำ grid
         const ids = posts.map(p => p.id);
@@ -67,3 +88,5 @@ export async function search(req, res, next) {
         return next(e);
     }
 }
+
+
