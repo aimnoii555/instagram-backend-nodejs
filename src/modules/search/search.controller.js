@@ -42,7 +42,7 @@ export async function search(req, res, next) {
                     EXISTS(SELECT 1 FROM likes l WHERE l.post_id = p.id AND l.user_id = ?) AS liked
             FROM posts p
             JOIN users u ON u.id = p.user_id
-            WHERE p.caption LIKE ?
+            WHERE p.deleted_at IS NULL AND p.caption LIKE ?
                 AND (
                 u.is_private = 0
                 OR u.id = ?

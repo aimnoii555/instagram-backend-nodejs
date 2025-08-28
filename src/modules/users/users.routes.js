@@ -1,15 +1,8 @@
 import { Router } from 'express';
 import {
-    getPublicProfileByUsername,
-    getMe,
-    updateMe,
-    followUser,
-    unfollowUser,
-    listFollowers,
-    listFollowing,
-    listFollowRequestsIncoming,
-    acceptFollowRequest,
-    declineFollowRequest
+    getPublicProfileByUsername, getMe, updateMe, followUser, unfollowUser, listFollowers,
+    listFollowing, listFollowRequestsIncoming, acceptFollowRequest, declineFollowRequest,
+    changePassword, getTrash
 } from './users.controller.js';
 import { requireAuth, tryAuth } from '../../middlewares/auth.js';
 
@@ -21,6 +14,9 @@ userRouter.get('/users/:username', tryAuth, getPublicProfileByUsername);
 /** /me ต้อง auth */
 userRouter.get('/me', requireAuth, getMe);
 userRouter.put('/me', requireAuth, updateMe);
+// change password
+userRouter.put('/me/password', requireAuth, changePassword)
+userRouter.get('/me/trash', requireAuth, getTrash);
 
 /** follow/unfollow ต้อง auth */
 userRouter.post('/users/:id/follow', requireAuth, followUser);
@@ -34,6 +30,8 @@ userRouter.get('/users/:id/following', tryAuth, listFollowing);
 userRouter.get('/me/follow-requests', requireAuth, listFollowRequestsIncoming);
 userRouter.post('/follow-requests/:followerId/accept', requireAuth, acceptFollowRequest);
 userRouter.post('/follow-requests/:followerId/decline', requireAuth, declineFollowRequest);
+
+
 
 
 export default userRouter;

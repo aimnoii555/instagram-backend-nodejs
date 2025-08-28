@@ -1,5 +1,7 @@
 import { pool } from '../../config/db.js';
 import path from 'path';
+import { fileURLToPath } from 'url';
+import { env } from '../../config/env.js';
 
 function mediaTypeOf(mime) {
     if (!mime) return 'image';
@@ -11,6 +13,17 @@ function publicUrlFor(filePath) {
     return '/' + norm.replace(/^\/?/, '');
 }
 
+// แปลง URL สาธารณะ /uploads/... -> ไฟล์พาธจริง
+function filePathFromUrl(publicUrl) {
+
+    // posts.controller.js อยู่ใน src/modules/posts => root = project/src
+    const __filename = fileURLToPath(import.meta.url);
+
+    const __dirname = path.dirname(__filename);
+    const projectRoot = path.resolve(__dirname, '..', '..', '..'); // ไปที่รากโปรเจกต์
+    const relative = publicUrl.replace(/^\//, ''); // ตัด / นำหน้า
+    return path.resolve(projectRoot, relative);
+}
 
 
 // --- helpers (ปรับให้อ่านจาก alias ใหม่) ---
@@ -48,6 +61,74 @@ function shapeMedia(row) {
         duration_ms: row.duration_ms,
         position: row.position
     };
+}
+
+
+/**  DELETE /comments/:id — ลบคอมเมนต์ของตัวเอง */
+export async function deleteComment(req, res, next) {
+    const myId = req.user.id;
+    const cid = Number(req.params.id);
+    if (!cid) return res.status(400).json({ error: 'Invalid comment id' });
+
+    try {
+        const [[c]] = await pool.query(
+            'SELECT id, user_id FROM comments WHERE id = ? LIMIT 1', [cid]
+        );
+        if (!c) return res.status(404).json({ error: 'Comment not found' });
+        if (c.user_id !== myId) return res.status(403).json({ error: 'Forbidden' });
+
+        await pool.query('DELETE FROM comments WHERE id = ?', [cid]);
+        return res.status(204).send();
+    } catch (e) { return next(e); }
+}
+
+
+/** DELETE /posts/:id — Soft delete */
+export async function deletePost(req, res, next) {
+    const myId = req.user.id;
+    const postId = Number(req.params.id);
+    const reason = (req.body?.reason || '').toString().slice(0, 255) || null;
+
+    try {
+        const [[own]] = await pool.query('SELECT user_id, deleted_at FROM posts WHERE id = ? LIMIT 1', [postId]);
+        if (!own) return res.status(404).json({ error: 'Post not found' });
+        if (own.user_id !== myId) return res.status(403).json({ error: 'Forbidden' });
+        if (own.deleted_at) return res.status(200).json({ status: 'ok', deleted: true }); // ลบไว้แล้ว
+
+        await pool.query(
+            'UPDATE posts SET deleted_at = NOW(), deleted_by = ?, deleted_reason = ?, updated_at = NOW() WHERE id = ?',
+            [myId, reason, postId]
+        );
+        return res.status(204).send();
+    } catch (e) { return next(e); }
+}
+
+
+/** PUT /posts/:id/restore — ยกเลิกการลบ (ภายใน retention window) */
+export async function restorePost(req, res, next) {
+    const myId = req.user.id;
+    const postId = Number(req.params.id);
+
+    try {
+        const [[row]] = await pool.query(
+            'SELECT user_id, deleted_at FROM posts WHERE id = ? LIMIT 1', [postId]
+        );
+        if (!row) return res.status(404).json({ error: 'Post not found' });
+        if (row.user_id !== myId) return res.status(403).json({ error: 'Forbidden' });
+        if (!row.deleted_at) return res.status(200).json({ status: 'ok', restored: true });
+
+        // ตรวจระยะเวลา
+        const [[age]] = await pool.query('SELECT TIMESTAMPDIFF(DAY, ?, NOW()) AS days', [row.deleted_at]);
+        if (age.days > env.softDelete.retentionDays) {
+            return res.status(410).json({ error: 'Restore window expired' }); // 410 Gone
+        }
+
+        await pool.query(
+            'UPDATE posts SET deleted_at = NULL, deleted_by = NULL, deleted_reason = NULL, updated_at = NOW() WHERE id = ?',
+            [postId]
+        );
+        return res.status(204).send();
+    } catch (e) { return next(e); }
 }
 
 
@@ -126,7 +207,7 @@ export async function getPost(req, res, next) {
               EXISTS(SELECT 1 FROM likes l WHERE l.post_id = p.id AND l.user_id = ?) AS liked
             FROM posts p
             JOIN users u ON u.id = p.user_id
-            WHERE p.id = ? LIMIT 1`,
+            WHERE p.id = ? AND p.deleted_at IS NULL LIMIT 1`,
             [myId, postId]
         );
 
@@ -159,7 +240,6 @@ export async function listUserPosts(req, res, next) {
         return res.status(403).json({ error: 'This account is private' });
     }
 
-
     try {
         const [rows] = await pool.query(
             `SELECT p.id, p.caption, p.location, p.created_at,
@@ -167,11 +247,11 @@ export async function listUserPosts(req, res, next) {
               (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) AS likes,
               (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) AS comments,
               EXISTS(SELECT 1 FROM likes l WHERE l.post_id = p.id AND l.user_id = ?) AS liked
-       FROM posts p
-       JOIN users u ON u.id = p.user_id
-       WHERE p.user_id = ?
-       ORDER BY p.created_at DESC, p.id DESC
-       LIMIT ? OFFSET ?`,
+            FROM posts p
+            JOIN users u ON u.id = p.user_id
+            WHERE p.user_id = ? AND p.deleted_at IS NULL
+            ORDER BY p.created_at DESC, p.id DESC
+            LIMIT ? OFFSET ?`,
             [myId, uid, limit, offset]
         );
         const ids = rows.map(r => r.id);
@@ -211,8 +291,8 @@ export async function getFeed(req, res, next) {
          EXISTS(SELECT 1 FROM likes l WHERE l.post_id = p.id AND l.user_id = ?) AS liked
        FROM posts p
        JOIN users u ON u.id = p.user_id
-       WHERE p.user_id = ?
-          OR p.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?)
+       WHERE p.deleted_at IS NULL AND (p.user_id = ?
+          OR p.user_id IN (SELECT following_id FROM follows WHERE follower_id = ?))
        ORDER BY p.created_at DESC, p.id DESC
        LIMIT ? OFFSET ?`,
             [myId, myId, myId, limit, offset]
@@ -255,11 +335,17 @@ export async function getFeed(req, res, next) {
 export async function likePost(req, res, next) {
     const myId = req.user.id;
     const postId = Number(req.params.id);
+
     try {
+
+        const [[p]] = await pool.query('SELECT deleted_at FROM posts WHERE id = ? LIMIT 1', [postId]);
+        if (!p || p.deleted_at) return res.status(404).json({ error: 'Post not found' });
+
         const [r] = await pool.query(
             'INSERT IGNORE INTO likes (user_id, post_id) VALUES (?, ?)',
             [myId, postId]
         );
+
         if (r.affectedRows === 1) {
             const [[owner]] = await pool.query('SELECT user_id FROM posts WHERE id = ? LIMIT 1', [postId]);
             if (owner && owner.user_id !== myId) {
@@ -296,7 +382,15 @@ export async function addComment(req, res, next) {
     const parentId = req.body?.parent_id ? Number(req.body.parent_id) : null;
     if (!text) return res.status(400).json({ error: 'text is required' });
 
+
+
+
     try {
+
+        const [[p]] = await pool.query('SELECT deleted_at FROM posts WHERE id = ? LIMIT 1', [postId]);
+        if (!p || p.deleted_at) return res.status(404).json({ error: 'Post not found' });
+
+
         const [r] = await pool.query(
             'INSERT INTO comments (post_id, user_id, text, parent_id) VALUES (?, ?, ?, ?)',
             [postId, myId, text, parentId, 'commented on your post']

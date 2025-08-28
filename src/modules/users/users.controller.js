@@ -1,4 +1,7 @@
 import { pool } from '../../config/db.js';
+import { comparePassword, hashPassword } from '../../utils/password.js';
+import { env } from '../../config/env.js';
+
 
 function shapeUser(row) {
     return {
@@ -35,7 +38,7 @@ export async function getPublicProfileByUsername(req, res, next) {
     try {
         const [rows] = await pool.query(
             `SELECT id, username, name, avatar_url, bio, website, is_private, created_at
-       FROM users WHERE username = ? LIMIT 1`,
+            FROM users WHERE username = ? LIMIT 1`,
             [username]
         );
         if (!rows.length) return res.status(404).json({ error: 'User not found' });
@@ -95,6 +98,152 @@ export async function getPublicProfileByUsername(req, res, next) {
         return next(err);
     }
 }
+
+
+/** GET /me/trash?type=post|reel&limit=20&offset=0
+ * รายการที่ลบแบบ soft ภายใน retention window พร้อม days_left
+ * response.items: [{ type, id, deleted_at, days_left, ... }]
+ */
+export async function getTrash(req, res, next) {
+    try {
+        const myId = req.user.id;
+        const type = (req.query.type || 'post').toString().toLowerCase();
+        const limit = Math.min(Number(req.query.limit) || 20, 100);
+        const offset = Math.max(Number(req.query.offset) || 0, 0);
+        const R = env.softDelete.retentionDays;
+
+        if (!['post', 'reel'].includes(type)) {
+            return res.status(400).json({ error: "type must be 'post' or 'reel'" });
+        }
+
+        if (type === 'post') {
+            const [rows] = await pool.query(
+                `SELECT p.id, p.caption, p.location, p.deleted_at,
+                GREATEST(0, ? - TIMESTAMPDIFF(DAY, p.deleted_at, NOW())) AS days_left
+                FROM posts p
+                WHERE p.user_id = ?
+                AND p.deleted_at IS NOT NULL
+                AND TIMESTAMPDIFF(DAY, p.deleted_at, NOW()) <= ?
+                ORDER BY p.deleted_at DESC, p.id DESC
+                LIMIT ? OFFSET ?`,
+                [R, myId, R, limit, offset]
+            );
+
+            // ดึง media ทุกชิ้นของโพสต์เหล่านี้ (ไว้ทำ preview/grid)
+            const ids = rows.map(r => r.id);
+            let mediaMap = {};
+            if (ids.length) {
+                const [media] = await pool.query(
+                    `SELECT id, post_id, media_url, media_type, position
+                    FROM post_media
+                    WHERE post_id IN (${ids.map(() => '?').join(',')})
+                    ORDER BY post_id ASC, position ASC`,
+                    ids
+                );
+                for (const m of media) {
+                    (mediaMap[m.post_id] ||= []).push({
+                        id: m.id,
+                        url: m.media_url,
+                        type: m.media_type,
+                        position: m.position
+                    });
+                }
+            }
+
+            return res.json({
+                items: rows.map(r => ({
+                    type: 'post',
+                    id: r.id,
+                    caption: r.caption ?? null,
+                    location: r.location ?? null,
+                    deleted_at: r.deleted_at,
+                    days_left: Number(r.days_left || 0),
+                    media: mediaMap[r.id] || []
+                })),
+                paging: { limit, offset },
+                meta: { retention_days: R }
+            });
+        }
+
+        // type === 'reel'
+        const [rows] = await pool.query(
+            `SELECT r.id, r.video_url, r.thumb_url, r.caption, r.deleted_at,
+              GREATEST(0, ? - TIMESTAMPDIFF(DAY, r.deleted_at, NOW())) AS days_left
+            FROM reels r
+            WHERE r.user_id = ?
+                AND r.deleted_at IS NOT NULL
+                AND TIMESTAMPDIFF(DAY, r.deleted_at, NOW()) <= ?
+            ORDER BY r.deleted_at DESC, r.id DESC
+            LIMIT ? OFFSET ?`,
+            [R, myId, R, limit, offset]
+        );
+
+        return res.json({
+            items: rows.map(r => ({
+                type: 'reel',
+                id: r.id,
+                video_url: r.video_url,
+                thumb_url: r.thumb_url,
+                caption: r.caption ?? null,
+                deleted_at: r.deleted_at,
+                days_left: Number(r.days_left || 0)
+            })),
+            paging: { limit, offset },
+            meta: { retention_days: R }
+        });
+    } catch (e) {
+        return next(e);
+    }
+}
+
+
+
+
+/** PUT /me/password
+ * body: { current_password, new_password }
+ * - ตรวจ current_password
+ * - อัปเดต password_hash
+ * - revoke refresh token ทั้งหมดของผู้ใช้ (ให้ล็อกอินใหม่)
+ */
+export async function changePassword(req, res, next) {
+    try {
+        const myId = req.user.id;
+        const current_password = (req.body?.current_password || '').toString();
+        const new_password = (req.body?.new_password || '').toString();
+
+        if (!current_password || !new_password) {
+            return res.status(400).json({ error: 'current_password and new_password are required' });
+        }
+        if (new_password.length < 8) {
+            return res.status(400).json({ error: 'new_password must be at least 8 characters' });
+        }
+
+        const [[row]] = await pool.query('SELECT password_hash FROM users WHERE id = ? LIMIT 1', [myId]);
+        if (!row) return res.status(404).json({ error: 'User not found' });
+
+        const ok = await comparePassword(current_password, row.password_hash);
+        if (!ok) return res.status(401).json({ error: 'Current password is incorrect' });
+
+        const newHash = await hashPassword(new_password);
+
+        const conn = await pool.getConnection();
+        try {
+            await conn.beginTransaction();
+            await conn.query('UPDATE users SET password_hash = ?, updated_at = NOW() WHERE id = ?', [newHash, myId]);
+            // revoke refresh ทั้งหมด (ทุกอุปกรณ์ต้องล็อกอินใหม่)
+            await conn.query('UPDATE refresh_tokens SET revoked = 1, revoked_at = NOW() WHERE user_id = ? AND revoked = 0', [myId]);
+            await conn.commit(); conn.release();
+        } catch (txErr) {
+            try { await conn.rollback(); } catch { }
+            try { conn.release(); } catch { }
+            return next(txErr);
+        }
+
+        return res.status(204).send(); // ให้ client พา user ไป login ใหม่
+    } catch (e) { return next(e); }
+}
+
+
 
 /** GET /me (auth) → ข้อมูลตัวเอง + สถิติ */
 export async function getMe(req, res, next) {
@@ -184,7 +333,7 @@ export async function followUser(req, res, next) {
         const [[target]] = await pool.query('SELECT id,is_private FROM users WHERE id = ? LIMIT 1', [targetId]);
 
         if (!target) return res.status(404).json({ error: 'User not found' });
-    
+
         if (target.is_private) {
             // ถ้า private → สร้างคำขอ (pending) แทนการ follow ทันที
             await pool.query(

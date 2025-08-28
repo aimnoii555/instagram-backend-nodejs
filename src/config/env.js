@@ -15,4 +15,7 @@ export const env = {
         accessExpiresIn: process.env.JWT_ACCESS_EXPIRES || '15m',
         refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES || '30d',
     },
+    softDelete: {
+        retentionDays: Number(process.env.SOFT_DELETE_RETENTION_DAYS || 30)
+    }
 };

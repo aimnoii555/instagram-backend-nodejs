@@ -1,7 +1,22 @@
 import { pool } from '../../config/db.js';
 import path from 'path';
+import { fileURLToPath } from 'url';
+import { env } from '../../config/env.js';
+
 
 function publicUrl(p) { return '/' + p.replace(/\\/g, '/').replace(/^\/?/, ''); }
+
+
+// แปลง URL สาธารณะ /uploads/... -> พาธไฟล์จริงในเครื่อง
+function filePathFromUrl(publicPath) {
+    if (!publicPath) return null;
+    const rel = publicPath.replace(/^\//, ''); // ตัด / นำหน้า
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    const projectRoot = path.resolve(__dirname, '..', '..', '..'); // ไป root โปรเจกต์
+    return path.resolve(projectRoot, rel);
+}
+
 
 export async function createReel(req, res, next) {
     try {
@@ -33,6 +48,7 @@ export async function listReels(req, res, next) {
               EXISTS(SELECT 1 FROM reel_likes rl WHERE rl.reel_id = r.id AND rl.user_id = ?) AS liked
        FROM reels r
        JOIN users u ON u.id = r.user_id
+       WHERE r.deleted_at IS NULL
        ORDER BY r.created_at DESC, r.id DESC
        LIMIT ? OFFSET ?`,
             [myId, limit, offset]
@@ -51,8 +67,15 @@ export async function listReels(req, res, next) {
 
 export async function likeReel(req, res, next) {
     try {
+
+
+
         const myId = req.user.id;
         const reelId = Number(req.params.id);
+
+        const [[r0]] = await pool.query('SELECT deleted_at FROM reels WHERE id = ? LIMIT 1', [reelId]);
+        if (!r0 || r0.deleted_at) return res.status(404).json({ error: 'Reel not found' });
+
         const [r] = await pool.query('INSERT IGNORE INTO reel_likes (user_id, reel_id) VALUES (?, ?)', [myId, reelId]);
 
         // แจ้งเตือนเจ้าของรีล (ถ้าเพิ่งไลก์ใหม่)
@@ -75,5 +98,55 @@ export async function unlikeReel(req, res, next) {
         const reelId = Number(req.params.id);
         await pool.query('DELETE FROM reel_likes WHERE user_id = ? AND reel_id = ?', [myId, reelId]);
         return res.json({ status: 'ok', liked: false });
+    } catch (e) { return next(e); }
+}
+
+
+/** DELETE /reels/:id (auth) — ลบรีลของตัวเอง + ลบไฟล์จริง
+ *  - จะลบ reel_likes แบบอัตโนมัติ (FK ON DELETE CASCADE)
+ */
+
+/** DELETE /reels/:id — Soft delete */
+export async function deleteReel(req, res, next) {
+    const myId = req.user.id;
+    const reelId = Number(req.params.id);
+    const reason = (req.body?.reason || '').toString().slice(0, 255) || null;
+
+    try {
+        const [[r]] = await pool.query('SELECT user_id, deleted_at FROM reels WHERE id = ? LIMIT 1', [reelId]);
+        if (!r) return res.status(404).json({ error: 'Reel not found' });
+        if (r.user_id !== myId) return res.status(403).json({ error: 'Forbidden' });
+        if (r.deleted_at) return res.status(200).json({ status: 'ok', deleted: true });
+
+        await pool.query(
+            'UPDATE reels SET deleted_at = NOW(), deleted_by = ?, deleted_reason = ?, updated_at = NOW() WHERE id = ?',
+            [myId, reason, reelId]
+        );
+        return res.status(204).send();
+    } catch (e) { return next(e); }
+}
+
+
+/** PUT /reels/:id/restore — ยกเลิกการลบภายใน retention window */
+export async function restoreReel(req, res, next) {
+    const myId = req.user.id;
+    const reelId = Number(req.params.id);
+
+    try {
+        const [[r]] = await pool.query('SELECT user_id, deleted_at FROM reels WHERE id = ? LIMIT 1', [reelId]);
+        if (!r) return res.status(404).json({ error: 'Reel not found' });
+        if (r.user_id !== myId) return res.status(403).json({ error: 'Forbidden' });
+        if (!r.deleted_at) return res.status(200).json({ status: 'ok', restored: true });
+
+        const [[age]] = await pool.query('SELECT TIMESTAMPDIFF(DAY, ?, NOW()) AS days', [r.deleted_at]);
+        if (age.days > env.softDelete.retentionDays) {
+            return res.status(410).json({ error: 'Restore window expired' });
+        }
+
+        await pool.query(
+            'UPDATE reels SET deleted_at = NULL, deleted_by = NULL, deleted_reason = NULL, updated_at = NOW() WHERE id = ?',
+            [reelId]
+        );
+        return res.status(204).send();
     } catch (e) { return next(e); }
 }
