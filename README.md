@@ -2,7 +2,7 @@
 
 file .env
 
-PORT=5050
+PORT=5050\n
 DB_HOST=localhost
 DB_USER=root
 DB_PASSWORD=
