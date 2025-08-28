@@ -1,6 +1,7 @@
 # instagram-backend-nodejs
 
 file .env
+
 PORT=5050
 DB_HOST=localhost
 DB_USER=root
