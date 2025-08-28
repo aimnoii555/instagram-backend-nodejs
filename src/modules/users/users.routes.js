@@ -35,4 +35,5 @@ userRouter.get('/me/follow-requests', requireAuth, listFollowRequestsIncoming);
 userRouter.post('/follow-requests/:followerId/accept', requireAuth, acceptFollowRequest);
 userRouter.post('/follow-requests/:followerId/decline', requireAuth, declineFollowRequest);
 
+
 export default userRouter;
