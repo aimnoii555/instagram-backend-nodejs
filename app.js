@@ -5,13 +5,13 @@ import { fileURLToPath } from 'url';
 
 
 import express from 'express';
-import authRouter from './modules/auth/auth.routes.js';
-import userRouter from './modules/users/users.routes.js';
-import postRouter from './modules/post/posts.routes.js'
-import storiesRouter from './modules/stories/stories.routes.js';
-import reelsRouter from './modules/reels/reels.routes.js';
-import searchRouter from './modules/search/search.routes.js';
-import notificationRouter from './modules/notifications/notification.routes.js';
+import authRouter from './src/modules/auth/auth.routes.js';
+import userRouter from './src/modules/users/users.routes.js';
+import postRouter from './src/modules/post/posts.routes.js'
+import storiesRouter from './src/modules/stories/stories.routes.js';
+import reelsRouter from './src/modules/reels/reels.routes.js';
+import searchRouter from './src/modules/search/search.routes.js';
+import notificationRouter from './src/modules/notifications/notification.routes.js';
 
 
 
